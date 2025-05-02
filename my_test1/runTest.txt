@@ -1,0 +1,6 @@
+Use this to run the explorer: 
+
+python3 main.py \
+    data_400v_90x90 \
+    --explorer ex02_random_dfs/explorer_config.txt \
+    --rescuer  ex02_random_dfs/rescuer_config.txt
