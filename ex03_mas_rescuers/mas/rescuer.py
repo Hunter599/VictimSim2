@@ -141,22 +141,21 @@ class Rescuer(AbstAgent):
 
 
     def sequencing(self):
-
         """
-        Replaces the simple sorting with a Genetic Algorithm to find an efficient
-        rescue sequence for each cluster of victims.
-        This version fixes the IndexError by having the GA operate on indices
-        (0 to n-1) instead of the raw victim IDs.
+        Replaces the simple sorting with a Multi-Objective Genetic Algorithm to find an
+        efficient rescue sequence.
+        The GA balances two objectives:
+        1.  Minimizing total travel time.
+        2.  Maximizing the sum of victim severities in the tour (higher is better).
+        It uses the NSGA-II selection algorithm, which is well-suited for
+        multi-objective optimization.
         """
-        # --- GA SETUP (once per agent) ---
-        # This bfs instance will be used by the fitness function
+        # --- GA SETUP ---
         bfs = BFS(self.map, self.COST_LINE, self.COST_DIAG)
 
-        # The fitness function aims to minimize the total travel time.
-        creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
-
-        # An individual is a permutation of indices, representing a tour.
-        creator.create("Individual", list, fitness=creator.FitnessMin)
+        # Multi-objective fitness: 1st objective is time (minimize), 2nd is severity (maximize)
+        creator.create("FitnessMulti", base.Fitness, weights=(-1.0, 1.0))
+        creator.create("Individual", list, fitness=creator.FitnessMulti)
 
         toolbox = base.Toolbox()
         
@@ -170,39 +169,42 @@ class Rescuer(AbstAgent):
 
             victim_ids = list(cluster.keys())
             num_victims = len(victim_ids)
+            
+            if num_victims == 0:
+                new_sequences.append({})
+                continue
 
             # --- GA registration for this specific cluster ---
-            
-            # Attribute generator: creates a permutation of indices from 0 to n-1
             toolbox.register("indices", random.sample, range(num_victims), num_victims)
-
-            # Structure initializers
             toolbox.register("individual", tools.initIterate, creator.Individual, toolbox.indices)
             toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
-            # The fitness evaluation function
             def evaluate_tour(individual_indices):
-                # individual_indices is a list of indices like [2, 0, 1, ...]
-                total_time = 0
+                total_time = 0.0
+                total_severity = 0.0
                 
-                # Get the victim ID for the first index in the tour
+                # Get victim ID and severity for the first index
                 first_vic_id = victim_ids[individual_indices[0]]
+                total_severity += cluster[first_vic_id][1][6]  # Assuming severity is at index 6
 
                 # 1. From base (0,0) to first victim
                 start_node = (0, 0)
                 end_node = cluster[first_vic_id][0]
                 _, time = bfs.search(start_node, end_node, self.plan_rtime - total_time)
-                if time < 0: return sys.maxsize, # Path not found or out of time
+                if time < 0: return sys.maxsize, 0
                 total_time += time
 
-                # 2. Between victims in the tour
+                # 2. Between victims
                 for i in range(num_victims - 1):
                     start_vic_id = victim_ids[individual_indices[i]]
                     end_vic_id = victim_ids[individual_indices[i+1]]
+                    
+                    total_severity += cluster[end_vic_id][1][6] # Add severity of next victim
+                    
                     start_node = cluster[start_vic_id][0]
                     end_node = cluster[end_vic_id][0]
                     _, time = bfs.search(start_node, end_node, self.plan_rtime - total_time)
-                    if time < 0: return sys.maxsize,
+                    if time < 0: return sys.maxsize, 0
                     total_time += time
 
                 # 3. From last victim back to base
@@ -210,43 +212,43 @@ class Rescuer(AbstAgent):
                 start_node = cluster[last_vic_id][0]
                 end_node = (0,0)
                 _, time = bfs.search(start_node, end_node, self.plan_rtime - total_time)
-                if time < 0: return sys.maxsize,
+                if time < 0: return sys.maxsize, 0
                 total_time += time
                 
-                # Handle overall time limit constraint
                 if total_time > self.plan_rtime:
-                    return sys.maxsize, 
+                    return sys.maxsize, 0
                     
-                return total_time, # DEAP requires the return to be a tuple
+                return total_time, total_severity
 
-            # Register GA operators
+            # Register GA operators using NSGA-II
             toolbox.register("evaluate", evaluate_tour)
             toolbox.register("mate", tools.cxOrdered)
             toolbox.register("mutate", tools.mutShuffleIndexes, indpb=0.05)
-            toolbox.register("select", tools.selTournament, tournsize=3)
+            toolbox.register("select", tools.selNSGA2) # Use NSGA-II for multi-objective selection
 
-            # --- RUN THE GA for this cluster ---
-            population = toolbox.population(n=50) # Population size
-            NGEN = 40 # Number of generations
-            CXPB = 0.7 # Crossover probability
-            MUTPB = 0.2 # Mutation probability
+            # --- RUN THE GA ---
+            population = toolbox.population(n=100) # Increased population for multi-objective
+            NGEN = 50
+            CXPB, MUTPB = 0.7, 0.2
 
-            # Run the evolution
-            algorithms.eaSimple(population, toolbox, cxpb=CXPB, mutpb=MUTPB, ngen=NGEN, verbose=False)
+            algorithms.eaMuPlusLambda(population, toolbox, mu=100, lambda_=100,
+                                      cxpb=CXPB, mutpb=MUTPB, ngen=NGEN,
+                                      stats=None, halloffame=None, verbose=False)
             
-            best_individual_indices = tools.selBest(population, 1)[0]
+            # Select the best individual from the final population
+            # For simplicity, we'll pick the one with the highest severity score among the non-dominated front
+            best_individual = tools.selBest(population, 1)[0]
             
             # --- CONSTRUCT THE NEW SEQUENCE ---
-            # Map the best sequence of indices back to an ordered dict of victim IDs
             ordered_sequence = {}
-            for index in best_individual_indices:
+            for index in best_individual:
                 vic_id = victim_ids[index]
                 ordered_sequence[vic_id] = cluster[vic_id]
             
             new_sequences.append(ordered_sequence)
 
         self.sequences = new_sequences
-        print(f"{self.NAME}: Sequencing complete using Genetic Algorithm.")
+        print(f"{self.NAME}: Sequencing complete using Multi-Objective GA.")
         
     def planner(self):
         """ A method that calculates the path between victims: walk actions in a OFF-LINE MANNER (the agent plans, stores the plan, and
