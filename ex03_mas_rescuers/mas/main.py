@@ -32,15 +32,29 @@ def main(data_folder_name, config_ag_folder_name):
     # Run the environment simulator
     env.run()
     
-        
+
+#Modified main, original code below
 if __name__ == '__main__':
-    """ To get data from a different folder than the default called data
-    pass it by the argument line"""
-    
-    if len(sys.argv) > 1:
-        data_folder_name = sys.argv[1]
-    else:
-        data_folder_name = os.path.join("datasets", "data_300v_90x90")
-        config_ag_folder_name = os.path.join("ex03_mas_random_dfs", "cfg_1")
-        
+    # default locations
+    default_data = os.path.join("datasets", "data_400v_90x90")
+    default_cfg  = os.path.join("ex03_mas_rescuers", "cfg_1")
+
+    # override with command‑line args
+    data_folder_name   = sys.argv[1] if len(sys.argv) > 1 else default_data
+    config_ag_folder_name = sys.argv[2] if len(sys.argv) > 2 else default_cfg
+
     main(data_folder_name, config_ag_folder_name)
+
+
+#Original code
+#if __name__ == '__main__':
+#    """ To get data from a different folder than the default called data
+#    pass it by the argument line"""
+#    
+#    if len(sys.argv) > 1:
+#        data_folder_name = sys.argv[1]
+#    else:
+#        data_folder_name = os.path.join("datasets", "data_300v_90x90")
+#        config_ag_folder_name = os.path.join("ex03_mas_random_dfs", "cfg_1")
+#        
+#    main(data_folder_name, config_ag_folder_name)

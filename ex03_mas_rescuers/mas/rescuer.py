@@ -22,6 +22,10 @@ from vs.constants import VS
 from bfs import BFS
 from abc import ABC, abstractmethod
 
+import numpy as np
+from sklearn.cluster import KMeans
+from deap import base, creator, tools, algorithms
+
 
 ## Classe que define o Agente Rescuer com um plano fixo
 class Rescuer(AbstAgent):
@@ -73,56 +77,56 @@ class Rescuer(AbstAgent):
                 vs = values[1]        # list of vital signals
                 writer.writerow([id, x, y, vs[6], vs[7]])
 
+
     def cluster_victims(self):
-        """ this method does a naive clustering of victims per quadrant: victims in the
-            upper left quadrant compose a cluster, victims in the upper right quadrant, another one, and so on.
+        """
+        This method clusters victims using the K-Means algorithm.
+        It partitions the victims into a predefined number of clusters (currently 4)
+        to match the number of rescuer agents managed in sync_explorers.
+
+        @returns: a list of clusters where each cluster is a dictionary in the format
+                  [vic_id]: ((x,y), [<vs>]), where vic_id is the victim id,
+                  (x,y) is the victim's position, and [<vs>] is the list of vital signals.
+        """
+        # The number of clusters is hardcoded to 4 to match the number of rescuers
+        # instantiated in the sync_explorers method.
+        NB_OF_CLUSTERS = 4
+
+        if not self.victims:
+            print(f"{self.NAME}: No victims to cluster.")
+            return [{} for _ in range(NB_OF_CLUSTERS)]
+
+        # 1. Prepare data for K-Means: a list of IDs and a NumPy array of coordinates
+        victim_ids = list(self.victims.keys())
+        victim_coords = np.array([self.victims[vic_id][0] for vic_id in victim_ids])
+
+        # If there are fewer victims than clusters, we can't form all clusters.
+        # K-Means will create min(n_samples, n_clusters) clusters.
+        num_clusters_to_form = min(len(victim_ids), NB_OF_CLUSTERS)
+
+        if num_clusters_to_form == 0:
+            print(f"{self.NAME}: No victims to form clusters.")
+            return [{} for _ in range(NB_OF_CLUSTERS)]
             
-            @returns: a list of clusters where each cluster is a dictionary in the format [vic_id]: ((x,y), [<vs>])
-                      such as vic_id is the victim id, (x,y) is the victim's position, and [<vs>] the list of vital signals
-                      including the severity value and the corresponding label"""
-
-
-        # Find the upper and lower limits for x and y
-        lower_xlim = sys.maxsize    
-        lower_ylim = sys.maxsize
-        upper_xlim = -sys.maxsize - 1
-        upper_ylim = -sys.maxsize - 1
-
-        vic = self.victims
-    
-        for key, values in self.victims.items():
-            x, y = values[0]
-            lower_xlim = min(lower_xlim, x) 
-            upper_xlim = max(upper_xlim, x)
-            lower_ylim = min(lower_ylim, y)
-            upper_ylim = max(upper_ylim, y)
+        # 2. Fit KMeans model
+        kmeans = KMeans(n_clusters=num_clusters_to_form, random_state=0, n_init=10)
+        kmeans.fit(victim_coords)
         
-        # Calculate midpoints
-        mid_x = lower_xlim + (upper_xlim - lower_xlim) / 2
-        mid_y = lower_ylim + (upper_ylim - lower_ylim) / 2
-        print(f"{self.NAME} ({lower_xlim}, {lower_ylim}) - ({upper_xlim}, {upper_ylim})")
-        print(f"{self.NAME} cluster mid_x, mid_y = {mid_x}, {mid_y}")
-    
-        # Divide dictionary into quadrants
-        upper_left = {}
-        upper_right = {}
-        lower_left = {}
-        lower_right = {}
+        # 3. Build the list of clusters from the results
+        clusters = [{} for _ in range(NB_OF_CLUSTERS)]
         
-        for key, values in self.victims.items():  # values are pairs: ((x,y), [<vital signals list>])
-            x, y = values[0]
-            if x <= mid_x:
-                if y <= mid_y:
-                    upper_left[key] = values
-                else:
-                    lower_left[key] = values
-            else:
-                if y <= mid_y:
-                    upper_right[key] = values
-                else:
-                    lower_right[key] = values
-    
-        return [upper_left, upper_right, lower_left, lower_right]
+        for i, label in enumerate(kmeans.labels_):
+            vic_id = victim_ids[i]
+            # The cluster label is the index of the cluster.
+            # We assign the victim to the corresponding cluster dictionary.
+            clusters[label][vic_id] = self.victims[vic_id]
+
+        print(f"{self.NAME}: Clustering complete. {len(self.victims)} victims partitioned into {num_clusters_to_form} clusters.")
+        for i, cluster in enumerate(clusters):
+            print(f"  - Cluster {i+1} has {len(cluster)} victims.")
+            
+        return clusters
+
 
     def predict_severity_and_class(self):
         """ @TODO to be replaced by a classifier and a regressor to calculate the class of severity and the severity values.
@@ -137,22 +141,113 @@ class Rescuer(AbstAgent):
 
 
     def sequencing(self):
-        """ Currently, this method sort the victims by the x coordinate followed by the y coordinate
-            @TODO It must be replaced by a Genetic Algorithm that finds the possibly best visiting order """
 
-        """ We consider an agent may have different sequences of rescue. The idea is the rescuer can execute
-            sequence[0], sequence[1], ...
-            A sequence is a dictionary with the following structure: [vic_id]: ((x,y), [<vs>]"""
+        """
+        Replaces the simple sorting with a Genetic Algorithm to find an efficient
+        rescue sequence for each cluster of victims.
+        This version fixes the IndexError by having the GA operate on indices
+        (0 to n-1) instead of the raw victim IDs.
+        """
+        # --- GA SETUP (once per agent) ---
+        # This bfs instance will be used by the fitness function
+        bfs = BFS(self.map, self.COST_LINE, self.COST_DIAG)
 
+        # The fitness function aims to minimize the total travel time.
+        creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+
+        # An individual is a permutation of indices, representing a tour.
+        creator.create("Individual", list, fitness=creator.FitnessMin)
+
+        toolbox = base.Toolbox()
+        
         new_sequences = []
 
-        for seq in self.sequences:   # a list of sequences, being each sequence a dictionary
-            seq = dict(sorted(seq.items(), key=lambda item: item[1]))
-            new_sequences.append(seq)       
-            #print(f"{self.NAME} sequence of visit:\n{seq}\n")
+        # --- RUN GA FOR EACH CLUSTER ---
+        for cluster in self.clusters:
+            if not cluster:
+                new_sequences.append({})
+                continue
+
+            victim_ids = list(cluster.keys())
+            num_victims = len(victim_ids)
+
+            # --- GA registration for this specific cluster ---
+            
+            # Attribute generator: creates a permutation of indices from 0 to n-1
+            toolbox.register("indices", random.sample, range(num_victims), num_victims)
+
+            # Structure initializers
+            toolbox.register("individual", tools.initIterate, creator.Individual, toolbox.indices)
+            toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+            # The fitness evaluation function
+            def evaluate_tour(individual_indices):
+                # individual_indices is a list of indices like [2, 0, 1, ...]
+                total_time = 0
+                
+                # Get the victim ID for the first index in the tour
+                first_vic_id = victim_ids[individual_indices[0]]
+
+                # 1. From base (0,0) to first victim
+                start_node = (0, 0)
+                end_node = cluster[first_vic_id][0]
+                _, time = bfs.search(start_node, end_node, self.plan_rtime - total_time)
+                if time < 0: return sys.maxsize, # Path not found or out of time
+                total_time += time
+
+                # 2. Between victims in the tour
+                for i in range(num_victims - 1):
+                    start_vic_id = victim_ids[individual_indices[i]]
+                    end_vic_id = victim_ids[individual_indices[i+1]]
+                    start_node = cluster[start_vic_id][0]
+                    end_node = cluster[end_vic_id][0]
+                    _, time = bfs.search(start_node, end_node, self.plan_rtime - total_time)
+                    if time < 0: return sys.maxsize,
+                    total_time += time
+
+                # 3. From last victim back to base
+                last_vic_id = victim_ids[individual_indices[-1]]
+                start_node = cluster[last_vic_id][0]
+                end_node = (0,0)
+                _, time = bfs.search(start_node, end_node, self.plan_rtime - total_time)
+                if time < 0: return sys.maxsize,
+                total_time += time
+                
+                # Handle overall time limit constraint
+                if total_time > self.plan_rtime:
+                    return sys.maxsize, 
+                    
+                return total_time, # DEAP requires the return to be a tuple
+
+            # Register GA operators
+            toolbox.register("evaluate", evaluate_tour)
+            toolbox.register("mate", tools.cxOrdered)
+            toolbox.register("mutate", tools.mutShuffleIndexes, indpb=0.05)
+            toolbox.register("select", tools.selTournament, tournsize=3)
+
+            # --- RUN THE GA for this cluster ---
+            population = toolbox.population(n=50) # Population size
+            NGEN = 40 # Number of generations
+            CXPB = 0.7 # Crossover probability
+            MUTPB = 0.2 # Mutation probability
+
+            # Run the evolution
+            algorithms.eaSimple(population, toolbox, cxpb=CXPB, mutpb=MUTPB, ngen=NGEN, verbose=False)
+            
+            best_individual_indices = tools.selBest(population, 1)[0]
+            
+            # --- CONSTRUCT THE NEW SEQUENCE ---
+            # Map the best sequence of indices back to an ordered dict of victim IDs
+            ordered_sequence = {}
+            for index in best_individual_indices:
+                vic_id = victim_ids[index]
+                ordered_sequence[vic_id] = cluster[vic_id]
+            
+            new_sequences.append(ordered_sequence)
 
         self.sequences = new_sequences
-
+        print(f"{self.NAME}: Sequencing complete using Genetic Algorithm.")
+        
     def planner(self):
         """ A method that calculates the path between victims: walk actions in a OFF-LINE MANNER (the agent plans, stores the plan, and
             after it executes. Eeach element of the plan is a pair dx, dy that defines the increments for the the x-axis and  y-axis."""
