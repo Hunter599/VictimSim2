@@ -4,8 +4,8 @@ import time
 
 ## importa classes
 from vs.environment import Env
-from explorer import Explorer
-from rescuer import Rescuer
+from .explorer import Explorer
+from .rescuer import Rescuer
 
 def main(data_folder_name, config_ag_folder_name):
    

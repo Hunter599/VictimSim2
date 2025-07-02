@@ -11,7 +11,7 @@ import math
 from abc import ABC, abstractmethod
 from vs.abstract_agent import AbstAgent
 from vs.constants import VS
-from map import Map
+from .map import Map
 
 class Stack:
     def __init__(self):

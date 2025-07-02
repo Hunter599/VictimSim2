@@ -1,6 +1,6 @@
 from collections import deque
 from vs.constants import VS
-from map import Map
+from .map import Map
 
 class BFS:
     def __init__ (self, map, cost_line=1.0, cost_diag=1.5):
