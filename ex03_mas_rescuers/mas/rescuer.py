@@ -24,6 +24,8 @@ from abc import ABC, abstractmethod
 import numpy as np
 from sklearn.cluster import KMeans
 
+import pickle
+
 # Imports for the Genetic Algorithm
 from deap import base, creator, tools, algorithms
 
@@ -105,15 +107,39 @@ class Rescuer(AbstAgent):
             print(f"  - Cluster {i+1} has {len(cluster)} victims.")
         return clusters
 
+    def save_predictions_csv(self, filename='predictions.csv'):
+        with open(filename, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            for vic_id, values in self.victims.items():
+                x, y = values[0]
+                vs = values[1]
+                gravity = vs[6].item() if hasattr(vs[6], 'item') else vs[6]
+                classe = vs[7].item() if hasattr(vs[7], 'item') else vs[7]
+                writer.writerow([vic_id, x, y, gravity, classe])
+
     def predict_severity_and_class(self):
         """ @TODO to be replaced by a classifier and a regressor to calculate the class of severity and the severity values.
             This method should add the vital signals(vs) of the self.victims dictionary with these two values.
 
             This implementation assigns random values to both, severity value and class"""
+        #USANDO REDES NEURAIS
+        with open("/home/bruno/Documents/github/VictimSim2-main/ex03_mas_rescuers/mas/NN_Scaler.pkl", "rb") as f:
+            scaler = pickle.load(f)
+        with open("/home/bruno/Documents/github/VictimSim2-main/ex03_mas_rescuers/mas/NN_Regressor.pkl", "rb") as f:
+            regressor = pickle.load(f)
+        with open("/home/bruno/Documents/github/VictimSim2-main/ex03_mas_rescuers/mas/NN_Classificador.pkl", "rb") as f:
+            classifier = pickle.load(f)
+
         for vic_id, values in self.victims.items():
-            severity_value = random.uniform(0.1, 99.9)          # to be replaced by a regressor 
-            severity_class = random.randint(1, 4)               # to be replaced by a classifier
-            values[1].extend([severity_value, severity_class])  # append to the list of vital signals; values is a pair( (x,y), [<vital signals list>] )
+            sinais_vitais = np.array(values[1][3:6]).reshape(1, -1)  # qPA, pulso, freq_resp
+            sinais_normalizados = scaler.transform(sinais_vitais)
+            gravidade = regressor.predict(sinais_normalizados)[0]
+            classe = classifier.predict(sinais_normalizados)[0]
+            values[1].extend([gravidade, classe])
+
+        self.save_predictions_csv('pred2.txt')
+        print("Arquivo salvo em:", os.path.abspath('pred2.txt'))
+
 
     def sequencing(self):
         """
@@ -185,8 +211,8 @@ class Rescuer(AbstAgent):
                 total_time += time
                 
                 if total_time > self.plan_rtime:
-                    return sys.maxsize, 0
-                return total_time, total_severity
+                    return float(sys.maxsize), 0
+                return float(total_time), float(total_severity)
 
             toolbox.register("evaluate", evaluate_tour)
             toolbox.register("mate", tools.cxOrdered)
@@ -211,34 +237,51 @@ class Rescuer(AbstAgent):
         print(f"{self.NAME}: Sequencing complete using Optimized Multi-Objective GA.")
         
     def planner(self):
-        """ A method that calculates the path between victims: walk actions in a OFF-LINE MANNER (the agent plans, stores the plan, and
-            after it executes. Eeach element of the plan is a pair dx, dy that defines the increments for the the x-axis and  y-axis."""
+        """ 
+        A method that calculates a realistic path for the rescuer.
+        It iterates through the sequenced victims and adds them to the plan only if
+        there is enough time to travel to the victim AND return to the base afterwards.
+        This prevents the agent from creating plans that it cannot complete.
+        """
         bfs = BFS(self.map, self.COST_LINE, self.COST_DIAG)
         if not self.sequences:
             return
         
-        # we consider only the first sequence (the simpler case)
         sequence = self.sequences[0]
         if not sequence: return
 
-        start = (0,0) # always from starting at the base
+        start_pos = (0,0)
+        
+        # NEW: Define a safety margin (e.g., 1.15 for a 15% buffer)
+        # The agent will only commit to a path if the estimated time multiplied
+        # by this factor is less than the remaining time.
+        SAFETY_MARGIN_FACTOR = 1.15
+        
         for vic_id in sequence:
-            goal = sequence[vic_id][0]
-            plan, time = bfs.search(start, goal, self.plan_rtime)
-            if plan:
-                self.plan = self.plan + plan
-                self.plan_rtime = self.plan_rtime - time
-                start = goal
+            goal_pos = sequence[vic_id][0]
+            path_to_victim, time_to_victim = bfs.search(start_pos, goal_pos, self.plan_rtime)
+            
+            if path_to_victim:
+                _, time_from_victim_to_base = bfs.search(goal_pos, (0,0), self.plan_rtime - time_to_victim)
+                
+                # NEW: Check if the total round trip, including the safety margin, fits
+                if time_from_victim_to_base >= 0 and (time_to_victim + time_from_victim_to_base) * SAFETY_MARGIN_FACTOR < self.plan_rtime:
+                    self.plan.extend(path_to_victim)
+                    self.plan_rtime -= time_to_victim
+                    start_pos = goal_pos
+                else:
+                    print(f"{self.NAME}: Not enough time to rescue victim {vic_id} and return safely. Finalizing plan.")
+                    break 
             else:
-                print(f"{self.NAME}: Could not plan path to {vic_id}, stopping plan.")
+                print(f"{self.NAME}: Could not plan path to victim {vic_id} with remaining time. Finalizing plan.")
                 break
         
-        # Plan to come back to the base
-        goal = (0,0)
-        plan, time = bfs.search(start, goal, self.plan_rtime)
-        if plan:
-            self.plan = self.plan + plan
-            self.plan_rtime = self.plan_rtime - time
+        final_path_to_base, _ = bfs.search(start_pos, (0,0), self.plan_rtime)
+        if final_path_to_base:
+            self.plan.extend(final_path_to_base)
+        
+        print(f"{self.NAME}: Realistic plan created with {len(self.plan)} steps.")
+
 
     def sync_explorers(self, explorer_map, victims):
         """ This method should be invoked only to the master agent
@@ -254,34 +297,25 @@ class Rescuer(AbstAgent):
         self.victims.update(victims)
         if self.received_maps == self.nb_of_explorers:
             print(f"{self.NAME} all maps received from the explorers")
-            #@TODO predict the severity and the class of victims' using a classifier
             self.predict_severity_and_class()
-
-            #@TODO cluster the victims possibly using the severity and other criteria
             clusters_of_vic = self.cluster_victims()
             
             for i, cluster in enumerate(clusters_of_vic):
                 if cluster:
                     self.save_cluster_csv(cluster, i+1)
             
-            # Instantiate the other rescuers
             rescuers = [None] * 4
-            rescuers[0] = self                    # the master rescuer is the index 0 agent
-            
-            # Assign the cluster the master agent is in charge of
+            rescuers[0] = self
             self.clusters = [clusters_of_vic[0]]
             
-            # Instantiate the other rescuers and assign the clusters to them
             for i in range(1, 4):
                 filename = f"rescuer_{i+1:1d}_config.txt"
                 config_file = os.path.join(self.config_folder, filename)
                 rescuers[i] = Rescuer(self.get_env(), config_file, 4, [clusters_of_vic[i]]) 
                 rescuers[i].map = self.map
             
-            # Calculate the sequence of rescue for each agent
             self.sequences = self.clusters
             
-            # For each rescuer, we calculate the rescue sequence 
             for i, rescuer in enumerate(rescuers):
                 if not rescuer: continue
                 rescuer.sequencing()
@@ -295,35 +329,44 @@ class Rescuer(AbstAgent):
                 rescuer.set_state(VS.ACTIVE)
          
     def deliberate(self) -> bool:
-        """ This is the choice of the next action. The simulator calls this
+        """ 
+        This is the choice of the next action. The simulator calls this
         method at each reasonning cycle if the agent is ACTIVE.
-        Must be implemented in every agent
-        @return True: there's one or more actions to do
-        @return False: there's no more action to do """
-        # No more actions to do
-        if self.plan == []:
+        This version adds resilience: if a planned move fails, it updates its map,
+        clears the current plan, and attempts to replan a safe path back to the base.
+        """
+        if not self.plan:
            print(f"{self.NAME} has finished the plan [ENTER]")
            return False
 
-        # Takes the first action of the plan (walk action) and removes it from the plan
         dx, dy = self.plan.pop(0)
-
-        # Walk - just one step per deliberation
         walked = self.walk(dx, dy)
 
-        # Rescue the victim at the current position
         if walked == VS.EXECUTED:
             self.x += dx
             self.y += dy
-            #print(f"{self.NAME} Walk ok - Rescuer at position ({self.x}, {self.y})")
-
-            # check if there is a victim at the current position
             if self.map.in_map((self.x, self.y)):
                 vic_id = self.map.get_vic_id((self.x, self.y))
                 if vic_id != VS.NO_VICTIM:
                     self.first_aid()
-                    #if self.first_aid(): # True when rescued
-                        #print(f"{self.NAME} Victim rescued at ({self.x}, {self.y})")
         else:
-            print(f"{self.NAME} Plan fail - walk error - agent at ({self.x}, {self.x})")
+            print(f"{self.NAME}: Plan fail - walk error at ({self.x+dx}, {self.y+dy}). Obstacle appeared or map is incorrect.")
+            
+            # NEW: Update the map with the newly found obstacle.
+            # We assume all 8 neighbors of the new wall are also walls, as a safe bet.
+            self.map.add((self.x + dx, self.y + dy), VS.OBST_WALL, VS.NO_VICTIM, [VS.OBST_WALL] * 8)
+
+            print(f"{self.NAME}: Clearing old plan and attempting to return to base.")
+            self.plan.clear()
+            
+            bfs = BFS(self.map, self.COST_LINE, self.COST_DIAG)
+            new_path_home, _ = bfs.search((self.x, self.y), (0,0), self.get_rtime())
+            
+            if new_path_home:
+                self.plan.extend(new_path_home)
+                print(f"{self.NAME}: New path to base calculated.")
+            else:
+                print(f"{self.NAME}: Could not find a new path to base. Agent is trapped.")
+                return False
+
         return True
